@@ -1,10 +1,12 @@
 # seis732-data-product
 SEIS 732 Data Product
 
-## Medicare Inpatient Charge Variations (2011-2015)
+## Historical Medicare Inpatient Charge and Payment Benchmarks (2011-2015)
 
-A data product that helps employer benefits analysts compare what hospitals charge for inpatient stays with what
-Medicare pays, using the BigQuery public dataset `bigquery-public-data.cms_medicare`.
+A data product that helps employer benefits analysts benchmark what hospitals billed against what Medicare paid
+for the same types of inpatient stays, using the BigQuery public dataset `bigquery-public-data.cms_medicare`.
+It is important to note that this describes historical Medicare data and does not establish current hospital prices
+or what an employer plan would pay.
 
 ## P0 files
 - [Feasibility write-up](docs/p0-feasibility.md)

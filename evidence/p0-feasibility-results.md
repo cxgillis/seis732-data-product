@@ -51,7 +51,6 @@ data_year	row_count	distinct_providers	distinct_stay_types	null_provider_ids	nul
 Zero counts for null and zero values look good.
 
 ## Now check the hospital_general_info table:
-
 ```sql
 SELECT COUNT(*),
   COUNT(DISTINCT provider_id) AS distinct_providers,
@@ -75,6 +74,29 @@ f0_	distinct_providers	null_provider_ids	null_state	null_hospital_type	distinct_
 
 Zero counts for nulls look good.
 
+## Now check the hospital_overall_rating in the hospital_general_info table:
+
+```sql
+SELECT hospital_overall_rating, COUNT(*) AS cnt
+ FROM `bigquery-public-data.cms_medicare.hospital_general_info`
+GROUP BY hospital_overall_rating;
+```
+
+### Results:
+```
+hospital_overall_rating    cnt
+Not Available    2006
+2    685
+1    197
+5    455
+4    983
+3    1010
+```
+
+### Interpretation:
+
+I see 2,006 of 5,336 hospital records are missing rating, so it's not reliable to use as a filter. 
+
 ## Finally record the authorized objects and inspect their definitions.
 ```sql
 SELECT table_name, column_name, data_type, is_nullable
@@ -85,7 +107,7 @@ ORDER BY table_name, ordinal_position;
 
 ### Results:
 
-```sql
+```
 table_name	column_name	data_type	is_nullable
 hospital_general_info	provider_id	STRING	YES
 hospital_general_info	hospital_name	STRING	YES

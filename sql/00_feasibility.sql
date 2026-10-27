@@ -37,3 +37,8 @@ SELECT table_name, column_name, data_type, is_nullable
 FROM `bigquery-public-data.cms_medicare.INFORMATION_SCHEMA.COLUMNS`
 WHERE table_name LIKE 'inpatient_charges_%' OR table_name = 'hospital_general_info'
 ORDER BY table_name, ordinal_position;
+
+-- Check the set and distribution of rating values
+SELECT hospital_overall_rating, COUNT(*) AS cnt
+ FROM `bigquery-public-data.cms_medicare.hospital_general_info`
+GROUP BY hospital_overall_rating;
