@@ -105,6 +105,7 @@ GROUP BY c.year ORDER BY c.year;
 -- 2013	3289	2990	0.91
 -- 2014	3276	3018	0.92
 -- 2015	3231	3019	0.93
+-- Total missing is 370, 337, 299, 258, 212
 
 -- That's better but still not perfect. Let's check another missing example
 SELECT DISTINCT provider_id, provider_name, provider_zipcode

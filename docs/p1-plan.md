@@ -241,7 +241,7 @@ profiling that some DRG codes change labels across years, but never within a yea
 dimension allows me to capture these changes over time, and show the value of the label as-of a specific year.
 
 The dimension will have one row per version of the 3-digit prefix from the DRG label, stored in `drg_code`, where a new
-version begins in any year whose label differs from that code's label in the previous year it was reported. The earlier
+version begins whenever a label differs from that code's label in the previous year it was reported. The earlier
 version is end-dated. If a label reverts to an earlier wording, it becomes a new version with its own `drg_id`. The
 current version of the dimension will have a NULL `last_year` value. A version ends the year before the next version of
 that code begins, so a code's versions are unbroken and never overlap, even across years when the code was not reported.
@@ -305,8 +305,149 @@ adding history there. I haven't measured how often a hospital's name or state di
 
 # 3. Plan the build and its checks
 
+## Layers
 
+| Layer   | What it will do                                                                                                                                                                                                                                                                                           | Object Names                                                                                            |
+|---------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------|
+| Raw     | Stores snapshots of source data in my own dataset, with a load_date TIMESTAMP column                                                                                                                                                                                                                      | inpatient_charges_*_snapshot<br>hospital_general_info_snapshot                                          |
+| Curated | Stores the fact and dimension tables, provides type 2 DRG history                                                                                                                                                                                                                                         | inpatient_charges_fact<br>hospital_dim<br>drg_dim<br>union_charges_stg<br>hospital_stg<br>rejected_rows |
+| Serving | Provides a view that has hospital attributes (type, ownership, lookup_source), DRG code/label, and final calculations used by dashboards. Removes never-billed hospitals. Cross-year views are restricted to codes present in every selected year (enforced in the dashboard query, see run order step 9) | inpatient_charges_totals_and_ratios                                                                     |
+
+## Preliminary Run Order
+
+Here's the preliminary run order I have in mind:
+
+1. Copy source tables into Raw snapshots in my own dataset.
+2. Load latest Raw snapshot of hospital data into staging table.
+3. Load union of latest Raw snapshot of each charges year table into a Curated working area union staging table.
+4. Check inputs, move any rows with any bad data or rule violations to a `rejected_rows` table in Curated.
+5. Load Curated dimensions with data confirmed for inclusion.
+6. Load Curated fact with data confirmed for inclusion.
+7. Perform checks and tests on Curated data to ensure Serving will be updated with intended data. 
+8. Serving view will reflect new data automatically, updating what is seen on the dashboards.
+9. The dashboard query will restrict to codes present in every selected year (mechanism to be decided later in P2, but
+   possibly a filter in the dashboard query or some other function).
+10. Run Serving validation to ensure calculations and grain appear correct.
+
+## Field Trace Example
+
+The field that I will trace is `total_covered_charges`. Here is a description of how it moves through the pipeline:
+
+1. Source fields `average_covered_charges` and `total_discharges` exist in CMS source tables `inpatient_charges_*`.
+2. Source table with these fields copied into my Raw dataset snapshot copy.
+3. The Raw latest snapshot tables for each year are combined via a union into an all years staging table (stored in Curated).
+4. Checks are run in Curated to filter out any charges rows that violate the rules. Some rules include:
+   - Key fields not null
+   - DRG label matches the three-digit pattern
+   - Discharges and charge fields not null
+   - Medicare payments greater than zero
+5. Charge data with those fields is loaded into the Curated fact table `inpatient_charges_fact`, into columns of the
+   same name `average_covered_charges` and `total_discharges`. The hospital lookup to set `hospital_key` is done using
+   the padded ID, and the DRG lookup to set `drg_id` is done using the DRG code and year check.
+6. As part of the same update as step 5, those two fields are multiplied via `total_discharges x average_covered_charges`
+   for each row and that value is loaded in the same Curated fact table into `total_covered_charges` field.
+7. The Serving view will reflect the new `total_covered_charges` data.
+8. The Serving view sums up the total_covered_charges and total_medicare_payments by hospital and by state
+   for any provided stay type and years, divides `total_covered_charges` by `total_medicare_payments`, and the dashboard
+   shows hospital ratio against state ratios.
+
+## Risks and Checks
+
+Three risks and corresponding checks that come to mind are:
+
+| Risk                                                        | Planned check                                                                                                                                                                                                                                                                                                           | Expected result                                                                                                             | Where            |
+|-------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------|------------------|
+| 1: Fact rows lost or duplicated when joining to dimensions. | Fact row counts + rejected total = source total. Every fact row matches only one row in `hospital_dim` and one row in `drg_dim`.                                                                                                                                                                                        | Counts equal, no dupes, expected rejects = 0                                                                                | Curated, step 7  |
+| 2. The hospital vs state comparison is wrong.               | a. Serving ratios for each state match the same calculated from Raw, for a sample of states with large size difference as well as DRGs.<br>b. For sample multi-year requests (2011-2015 and 2013-2015), I will count the DRG codes in Serving view output that have no fact rows in one or more of the requested years. | a. Match within reasonable FLOAT rounding<br>b. Out of set codes = 0                                                        | Serving, step 10 |
+| 3: Missing hospital attributes due to backfilling           | Count distinct fact hospitals per year with `lookup_source = "charges"`.                                                                                                                                                                                                                                                | Compare to unmatched hospital counts per year from the task 1 match query: 2011:370, 2012:337, 2013:299, 2014:258, 2015:212 | Curated, step 7  |
+
+## Access Decisions
+
+My traced field `total_covered_charges` comes from public hospital-level aggregates, and no patient data is included
+as part of this or is ever shown to analysts. So I don't feel that any special access control is needed.
+
+Hospital name will appear alongside the total covered charges. However, potentially sensitive hospital information like
+phone numbers and address are not loaded, so even if it was decided those required non-public handling it wouldn't be an issue.
+
+The intended user of the field is the employer benefits analyst, the owner for the objects in the project schema is me
+whereas the source objects are owned by CMS.
+
+The traced field `total_covered_charges` will reappear in the audience output, and this is by design since the ratios
+show on the dashboard.
+
+## Largest Remaining Limitation
+
+I think the largest remaining limitation is where hospital attributes, like type and ownership, are missing for about
+9% of hospital-year data due to not being present in the source `hospital_general_info` table. Additionally, the values
+that are present are from a snapshot of an unknown as-of date. This is a limitation from the source system that I am not
+able to fix.
+
+My primary question is able to compare hospitals within a state using fields that are available for every hospital.
+However, my supporting question is only able to compare fields that are current as-of the unknown snapshot date.
+
+## First P2 Build Step 
+
+My first concrete P2 build step is to load the six Raw snapshot tables and confirm the counts of each table match the
+source counts: 163,065, 157,747, 153,600, 202,656, 201,876, and 5,336.
 
 # 4. Diagnose and revise the plan
 
+During the in-class peer review, I shared an overview of my plan and solicited feedback. The memo instructed by the peer
+diagnosis exercise is below.
+
+## P1 change memo
+
+- I did not receive any specific feedback other than some questions asking to explain why I had the specific year and
+  DRG code limitations that I have outlined.
+  - I showed how the datasets were both restricted to just a small set of years (2011-2015) and also explained how the CMS
+    dataset changed from only top 100 DRGs for a year to all in 2014.
+  - So no changes were needed based on those questions.
+- Peer review did not surface any other needed modifications, so I don't have anything else to call out or highlight for
+  that portion.
+- Most important remaining uncertainty:
+  - I believe the main uncertainty I have is around incomplete dimension lookups and attributes, specifically with the
+    hospital type and ownership fields that are unavailable for about 9% hospital-years.
+
+## AI/tool accountability
+
+I used AI to help me review and clean up my work throughout P1, as I did in P0. I treated its output as leads to check, not as
+evidence, and I remain responsible for every claim in this plan.
+
+### What I used it for
+- Interpreting the P1 requirements and outlining each task.
+- Drafting SQL patterns that I then adapted and ran: the combined-year grain check, the hospital join match-rate query,
+  and the DRG coverage queries.
+- Drafting the Mermaid source for the model diagram, which I edited and exported to `model.png`.
+- Searching for background on DRG changes and on BigQuery materialized view limits.
+- Reviewing and suggesting edits to my wording in each section.
+
+### What was my own work
+- Running every query and recording the results, and tracing the join gap to the dropped leading zeros.
+- Finding the CMS methodology document that explains the top-100 DRGs in 2011-2013.
+- Choosing the DRG code (not the label) as the key, designing the end-dated Type 2 versioning for `drg_dim`, and
+  deciding to backfill hospitals missing from the lookup using the charge tables.
+
+### How I verified
+- I ran all queries in BigQuery and compared the results to the plan: the 878,944 source rows, the grain check counts,
+  the match rates by year, and the DRG coverage distribution.
+- I spot-checked unmatched hospitals in the console and did not copy any source rows into the repository.
+- I checked the CMS methodology document myself.
+- I checked the BigQuery documentation on materialized views before deciding not to use one.
+
+### Where AI output was wrong or needed correcting
+- The AI said both `provider_id` columns were the same type, so no conversion was needed. My query showed the
+  charge tables drop leading zeros, and I fixed the join by padding the ID to six characters.
+- My P0 write-up said the overall rating was "Not Available" for every row, and I had not saved a query showing it. The
+  review prompted me to rerun it, and it showed 2,006 of 5,336 hospitals (about 38%). I corrected P0 and removed the claim.
+- The AI referenced a Defense Health Agency page to say there were no DRG revisions in 2013. My query showed code 065 changed
+  its label text in 2013, so I relied on the CMS sources and my own result.
+- I had planned a materialized view for Serving. The documentation shows materialized views do not support window
+  functions or self-joins, which my hospital-versus-state comparison would need, so I changed the plan to a regular view.
+
+### Suggestions I did not adopt
+- Taking `state` from the charge tables instead of `hospital_general_info`. I kept the lookup as the source and use the
+  charge tables only to backfill the hospitals it is missing.
+- Measuring the share of discharges belonging to unmatched hospitals, and comparing the charge-to-payment ratio of
+  matched and unmatched hospitals. I judged these beyond what P1 expects, and the plan states the unmeasured share as
+  a limitation.
 
