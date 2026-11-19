@@ -12,3 +12,13 @@ or what an employer plan would pay.
 - [Feasibility write-up](docs/p0-feasibility.md)
 - [Feasibility SQL](sql/00_feasibility.sql)
 - [Feasibility results](evidence/p0-feasibility-results.md)
+
+## P1 files
+- [Plan write-up](docs/p1-plan.md)
+- [Source Profile SQL](sql/01_source_profile.sql)
+
+## P2 files
+- [Build write-up](docs/p2-build.md)
+- [Ingest SQL](sql/02_ingest.sql)
+- [Curate SQL](sql/03_curate.sql)
+- [Acceptance SQL](sql/04_acceptance.sql)

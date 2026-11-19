@@ -70,8 +70,20 @@ SELECT COUNT(*) AS cnt
         HAVING COUNT(*) > 1) d;
 -- 0
 
+-- Supporting count (mentioned in Section 2)
+-- lookup hospitals that were billed vs never billed in the fact
+SELECT COUNTIF(f.hospital_key IS NULL)     AS lookup_never_billed
+     , COUNTIF(f.hospital_key IS NOT NULL) AS lookup_billed
+  FROM `seis732-508701.seis732_project.hospital_dim` h
+  LEFT JOIN (SELECT DISTINCT hospital_key
+               FROM `seis732-508701.seis732_project.inpatient_charges_fact`) f
+    ON h.hospital_key = f.hospital_key
+ WHERE h.lookup_source = 'lookup';
+-- lookup_never_billed	lookup_billed
+-- 2282	3054
+
 --
--- Check 2: Row Meaning w/ totals
+-- Check 2: Totals feeding the ratio of sums
 --
 SELECT COALESCE(src.`year`,fct.`year`) AS `year`
      , SUM(src.total_discharges) AS src_discharges

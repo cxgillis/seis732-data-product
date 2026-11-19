@@ -19,7 +19,7 @@ Code: [02_ingest.sql](../sql/02_ingest.sql), [03_curate.sql](../sql/03_curate.sq
     data product.
   - It copies the source CMS inpatient charges and hospital general info into Raw snapshot tables, builds Curated with
     a fact table at a year/hospital/type-of-stay (DRG) grain along with dimension tables for hospital and DRG.
-  - It also infers hospital dimension records missing from the hospital_general_info source by backfilling from the 
+  - It also infers hospital dimension records missing from the hospital_general_info source by backfilling from the
     inpatient_charges_* tables, as otherwise in-state comparisons would be incomplete and inaccurate.
   - This provides the rows the Serving output will use to let the audience compare charges and payments across year,
     hospital, and DRG dimensions later in the Serving dataset.
@@ -169,42 +169,144 @@ Code: [03_curate.sql](../sql/03_curate.sql)
 
 Code: [04_acceptance.sql](../sql/04_acceptance.sql)
 
-| Risk and affected result | Check code | Expected result and why | Observed result | Interpretation or action |
-|---|---|---|---|---|
-| Grain / relationship: TODO | TODO | TODO | TODO | TODO |
-| Row meaning: TODO | TODO | TODO | TODO | TODO |
+| Risk and affected result                                                                                                  | Check code                                                                                                                                     | Expected result and why                                                                                                                                                                                                                                                                                                                                                                                                       | Observed result                                                                                                                                                       | Interpretation or action                                                                                                                                                                                                                                                        |
+|---------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Risk 1: Fact rows lost, duplicated or misjoined. This would distort every hospital and state total built on the fact.     | [04_acceptance.sql](../sql/04_acceptance.sql), Check 1: row accounting, grain and join count, DRG version fit, version overlap, key uniqueness | Source charge rows (same as Raw snapshot rows) = fact rows + rejected rows. Fact rows = distinct (`year`, `provider_id_std`, `drg_code`) after joining to both dimensions. 0 fact rows outside their DRG version's years, 0 overlapping versions, 0 duplicate `hospital_key` or `drg_id`. Each source row must map to exactly one fact row, one hospital, and one DRG version, so any other value means something went wrong. | 878,944 = 878,944 + 0. 878,944 fact rows and 878,944 distinct combinations. 0 rows outside their version, 0 overlaps, 0 duplicate keys, and 0 rejected hospital rows. | The grain stayed intact after the joins. No rows were lost or duplicated and no treatment was needed. The 0 rejects agree with my P1 profile.                                                                                                                                   |
+| Risk 2 (revised from Serving): Totals that feed the ratio of sums do not mean what the audience measure assumes it would. | [04_acceptance.sql](../sql/04_acceptance.sql), Check 2: per-year reconciliation of Raw to fact                                                 | For each year, Raw sums of discharges, discharges × average charges, and discharges × average Medicare payments equal the fact sums, with difference 0. The fact holds the same products, so they should be equal. Float rounding is the only reason a tiny difference could appear.                                                                                                                                          | Differences were 0 for all five years (for example, 2011 charges 245,977,915,109 on both sides).                                                                      | The Curated totals match Raw, so the joins did not distort the measures the ratio uses. This shows that the rows carry the same totals, but not that the formula is necessarily right, and I have not checked the effect of the source's rounded averages. No treatment needed. |
 
 ## Changes to the P1 risks
-- TODO
+
+- Risk 1 (fact rows lost or duplicated by the dimension joins):
+  - I kept this as acceptance Check 1. However, I made it more specific than I had in my original P1 plan.
+  - The join test became a comparison of the fact count with the distinct (`year`, `provider_id_std`, `drg_code`)
+    count after joining both dimensions.
+  - I added checks that every fact row falls inside its DRG version's year range, that DRG versions never overlap,
+    and that `hospital_key` and `drg_id` are unique.
+  - The P1 expectation of 0 rejects held.
+- Risk 2 (hospital vs state comparison is wrong):
+  - This is a Serving-level check and the Serving view is not built until P3, so I moved it there. 
+  - For this section I replaced it with Check 2, a per-year reconciliation of Raw sums to the fact totals, which felt
+    like a good idea since the ratio of sums depends on those totals being right.
+  - It is a Curated-level precursor to the P1 check, and not a replacement for it.
+- Risk 3 (missing hospital attributes due to backfilling):
+  - I did not use it as one of the two checks and instead used it as the Advanced case.
+  - The P1 check (inferred hospitals per year against the unmatched counts) matched exactly.
+  - I added the inferred hospitals' share of fact rows and discharges, which I listed in P1 as an unmeasured limitation.
 
 ## Problems found and treatment
-- TODO (result after any correction; any unresolved issue)
+- My first run hit an error due to using FLOAT as a datatype, but BigQuery uses FLOAT64. I fixed the SQL.
+- No check result was wrong, so no data treatment was needed.
+- I have no unresolved issues in these checks, and the limitations are noted above in section 2 and the advanced case below.
 
 ## Additional case (Advanced)
-- Case: TODO (e.g., DRG 065 label change, or inferred hospital members)
-- How it affects the Curated result: TODO
-- Evidence and chosen treatment: TODO
+- Case:
+  - About 9% of hospital-years have no row in `hospital_general_info`. Rather than drop them, my `03_curate.sql`
+    adds an inferred `hospital_dim` row for each (407 hospitals, `lookup_source = 'charges'`), with name, city, and state
+    taken from the charge data and type and ownership set to `Unknown`.
+- Check:
+  - Found in [04_acceptance.sql](../sql/04_acceptance.sql) - Advanced Case
+  - Shows the distinct fact hospitals with `lookup_source = 'charges'` per year and their share of fact rows and discharges.
+- Expected:
+  - For each year, the distinct fact hospitals with `lookup_source = 'charges'` equal the unmatched-hospital counts from my 
+    P1 match query (370, 337, 299, 258, 212), since both count the hospitals billed that year that are absent from the lookup.
+  - So any discrepancy would mean a hospital was mislabeled or lost in the dimension build.
+- Result:
+
+  | Year | Hospitals | Inferred hospitals (share) | Inferred fact rows (share) | Inferred discharges (share) |
+  |------|-----------|----------------------------|----------------------------|-----------------------------|
+  | 2011 | 3,337     | 370 (11.1%)                | 9,153 (5.6%)               | 283,906 (4.1%)              |
+  | 2012 | 3,317     | 337 (10.2%)                | 7,508 (4.8%)               | 232,217 (3.5%)              |
+  | 2013 | 3,289     | 299 (9.1%)                 | 6,227 (4.1%)               | 188,144 (2.9%)              |
+  | 2014 | 3,276     | 258 (7.9%)                 | 5,600 (2.8%)               | 158,137 (2.2%)              |
+  | 2015 | 3,231     | 212 (6.6%)                 | 4,755 (2.4%)               | 136,943 (1.8%)              |
+  - The inferred hospital counts match the unmatched-hospital counts from my P1 match query exactly
+    (370, 337, 299, 258, 212 = 1,476 total hospital-years), so the dimension covers every hospital that has charges.
+- How it affects the Curated result:
+  - Over the five years the inferred hospitals account for 33,243 of 878,944 fact rows (3.8%) and 999,347 of
+    34,886,548 discharges (2.9%).
+  - Without them, the inner join to the lookup would silently drop that amount from every state comparison.
+  - The share is smaller than the 9% of hospital-years because these hospitals are smaller on average (in 2011, about
+    770 discharges per inferred hospital against about 2,090 for all hospitals).
+  - The share also falls each year, from 4.1% of discharges in 2011 to 1.8% in 2015.
+  - This is consistent with my P1 hypothesis that older hospitals are more likely to be missing from the master list.
+  - I didn't compare the charge-to-payment ratios of inferred and lookup hospitals, so I can’t say whether excluding them would change rankings.
+- Chosen treatment:
+  - I will keep the inferred rows.
+  - The primary question (hospital against state) only needs name and state, which the charges provide.
+  - The supporting question (type and ownership) can't use these hospitals, so views that filter on type or ownership
+    will be labeled to say that some charge data is excluded.
+  - The `lookup_source` column I added lets an analyst filter these out.
 
 # 4. Make the run reproducible and record the next step
 
 ## Run order
 
-| Step | Code | Must already exist | Effect | Result to save before the next step |
-|---|---|---|---|---|
-| 1. Create dataset and Raw | [02_ingest.sql](../sql/02_ingest.sql) | Source access | TODO (replaces) | TODO |
-| 2. Build Curated | [03_curate.sql](../sql/03_curate.sql) | Raw snapshots | TODO | TODO |
-| 3. Run checks | [04_acceptance.sql](../sql/04_acceptance.sql) | Curated objects | TODO (read-only) | TODO |
+Run in the listed order. Each step reads the objects created by the step before.
 
-- Run instructions checked against the build I performed: TODO (date)
+| Step                                                      | Code                                                            | Must already exist                                                                                     | Effect                                                                                                                                                                                                                                   | Result to save before the next step                                                              |
+|-----------------------------------------------------------|-----------------------------------------------------------------|--------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------|
+| 1. Create the dataset and Raw snapshots, then verify them | [02_ingest.sql](../sql/02_ingest.sql): sections 1 and 2 (2a–2f) | Read access to `bigquery-public-data.cms_medicare`; project `seis732-508701`; location US              | Creates dataset `seis732_project` if it doesn't exist. Creates or replaces the six `_snapshot` tables with new `load_date` values.                                                                                                       | Verification results (2a–2f): source `last_modified` and row counts, and the `load_date` window. |
+| 2. Build staging and Curated                              | [03_curate.sql](../sql/03_curate.sql): run as one script        | The six Raw snapshot tables                                                                            | Replaces `union_charges_stg`, `hospital_stg`, `rejected_rows`, `hospital_dim`, `drg_dim`, and `inpatient_charges_fact`, then loads them in order. Everything overwrites, so a rerun gives the same result when using the same Raw input. | The row counts per object (staging, rejects, dimensions, fact).                                  |
+| 3. Run the acceptance checks                              | [04_acceptance.sql](../sql/04_acceptance.sql)                   | The Curated objects from step 2, the Raw snapshots, and read access to the public source (for Check 1) | These are read-only and change no objects.                                                                                                                                                                                               | The results of each check (recorded in Section 3)                                                |
+
+- The `03_curate.sql` code is designed to run as a single script because it uses temporary tables and a loop over the years (2011 to 2015, in order).
+- Before rerunning, copy the Curated tables if the earlier result is needed for comparison.
+- The `load_date` changes on every run and should be excluded from comparisons, and the surrogate keys are deterministic, so the same input produces the same keys.
+- For the run instructions checked against the build I performed, I ran the steps in the order directed above:
+    - First 02_ingest.sql on 2026-11-10
+    - Then 03_curate.sql on 2026-11-17
+    - Finally, 04_acceptance.sql on 2026-11-17
+    - The table matches what I ran, and the counts in Sections 2 and 3 come from that final run.
+
 
 ## Main limitation of this P2 path
-- TODO
+- Type and ownership are `Unknown` for the 407 inferred hospitals, so the supporting question can't use them.
+- I measured their share of volume, but I didn't compare their charge-to-payment ratios with those of the lookup
+  hospitals, so I'm not certain whether excluding them would change any rankings.
+- The hospital attributes that exist also come from a lookup with an unknown as-of date, so they may not be accurate for
+  the charges for any given year.
 
 ## Next P3 step
-- TODO (Serving output, rerun and changed-input demos, history verification)
+- I will build the Serving view `inpatient_charges_totals_and_ratios` (a regular view, not materialized).
+- It will serve the hospital and state ratio of sums, never-billed hospitals removed, and cross-year views restricted
+  to codes present in every selected year.
+- I'll test it for one state, one DRG code, and one year against an independent recalculation from Raw.
+- Then I'll complete the same-input rerun and changed-input demonstrations and the history verification for DRG 065.
 
 ## Model or explanation updates
-- TODO
+- For DRG, I decided to change how `drg_dim` stores the label text without its code prefix, in a column named `drg_label`.
+  - My original `model.png` shows `drg_definition`. The source `drg_definition` string is kept in staging.
+  - The `drg_id` is a deterministic FARM_FINGERPRINT hash of `drg_code` and `first_year`.
+- For Hospital, the `hospital_key` stays as P1 originally planned.
+  - It is a deterministic FARM_FINGERPRINT hash of `provider_id_std`.
+- The grain, the dimensions, and the key decisions are otherwise unchanged from P1. I didn't regenerate `model.png`.
 
 ## AI and tool assistance
-- TODO (what was used, how I checked it)
+- I used AI throughout P2 and treated its output as leads to check, not evidence. I remain responsible for the code,
+  the decisions, and the claims I have made.
+- What I used it for:
+  - Outlining the P2 tasks (and drafting this AI usage note).
+  - Reviewing my SQL code before I ran it.
+  - Suggesting `FARM_FINGERPRINT` for deterministic surrogate keys.
+  - Helping with the MERGE pattern for the Type 2 DRG dimension and the version overlap check.
+  - Reviewing my wording.
+- What was my own work:
+  - Running every query.
+  - Choosing the checks and the Advanced case.
+  - Deciding to load the DRG versions year by year.
+  - Verifying the numbers.
+- How I verified:
+  - I ran all SQL in BigQuery.
+  - I compared counts with my P1 profile and with the source, recalculated the totals independently from Raw, matched
+    the inferred hospital counts to my P1 numbers, and confirmed the billed and never-billed hospital split with its own query.
+- Where AI output needed correcting or I did not follow it:
+  - Its review caught errors in my drafts before I ran them: the fact `MERGE` pointed at the wrong table, the hospital
+    selection took the lowest-ranked candidate, the lookup columns were misnamed, the fact build did not exclude rejected
+    rows, and `load_date` was typed `DATETIME` against a `TIMESTAMP` source.
+  - I fixed each. A separate `FLOAT` type error (GoogleSQL requires `FLOAT64`) failed my first run.
+  - It suggested a one-shot load of the DRG dimension. I chose year-by-year merges so a new year can be added later.
+  - It first recommended dropping the hospital surrogate key, then recommended keeping it. I kept it, to match my P1
+    model.
+  - It suggested a numeric tolerance for the totals comparison. I used exact equality, and the observed differences were 0.
+  - It suggested a shorter positive key range for the hashed keys. I kept the full hash since it was much simpler to
+    implement, and the cosmetic change wasn’t needed.
